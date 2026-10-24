@@ -76,6 +76,14 @@ jobs:
           git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
           git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "git@github.com:"
 
+      - name: DEBUG credentials
+        if: ${{ env.DEPS_TOKEN != '' }}
+        run: |
+          echo "prefix=${DEPS_TOKEN:0:11} length=${#DEPS_TOKEN}"
+          curl -s -o /dev/null -w "limulus api: %{http_code}\n" -H "Authorization: Bearer $DEPS_TOKEN" https://api.github.com/repos/PlanetesLAB/limulus
+          git config --global --get-regexp insteadof | sed -E 's#(x-access-token:)[^@]*@#\1***@#'
+          git config --get-regexp extraheader | sed -E 's#(basic )[A-Za-z0-9+/=]+#\1***#' || true
+
       - name: Check the version
         id: ver
         shell: python
