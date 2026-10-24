@@ -66,6 +66,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
           submodules: ${{ inputs.submodules }}
 
       - name: Let git reach private dependencies
