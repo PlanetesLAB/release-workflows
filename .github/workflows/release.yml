@@ -1,0 +1,211 @@
+# Shared release pipeline for all PlanetesLAB crates/packages.
+#
+# Called from each repo (see callers/). What it does:
+#   * reads the version from a manifest (Cargo.toml or pyproject.toml)
+#   * compares it with the existing tags that share a prefix
+#   * on every run (push or PR): fails if the version is not the same as the latest tag or one of
+#     the three valid semver increments of it (patch / minor / major)
+#   * on a push to the release branch where the version is a valid increase: runs the checks,
+#     creates the annotated tag and the GitHub Release (notes = commit subjects since the previous tag)
+# It never looks at commit messages, so any commit style works.
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        description: "Path to Cargo.toml or pyproject.toml holding the version"
+        type: string
+        default: Cargo.toml
+      tag-prefix:
+        description: "Tag prefix, e.g. v, sundials-v, scorpia-py-v"
+        type: string
+        default: v
+      release-branch:
+        description: "Branch that creates releases (default: the repository's default branch)"
+        type: string
+        default: ""
+      test-command:
+        description: "Run before releasing. Empty skips. Default is for Rust crates."
+        type: string
+        default: "cargo test --locked"
+      apt-packages:
+        description: "Space separated apt packages to install first"
+        type: string
+        default: ""
+      submodules:
+        type: boolean
+        default: false
+      setup-uv:
+        description: "Install uv (for Python packages)"
+        type: boolean
+        default: false
+    secrets:
+      DEPS_TOKEN:
+        description: "Fine-grained token with read access to the private repos used as git dependencies"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.repository }}-${{ inputs.tag-prefix }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      MANIFEST: ${{ inputs.manifest }}
+      PREFIX: ${{ inputs.tag-prefix }}
+      GH_TOKEN: ${{ github.token }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          submodules: ${{ inputs.submodules }}
+
+      - name: Let git reach private dependencies
+        if: ${{ env.DEPS_TOKEN != '' }}
+        run: |
+          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+      - name: Check the version
+        id: ver
+        shell: python
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RELEASE_BRANCH: ${{ inputs.release-branch || github.event.repository.default_branch }}
+          SHA: ${{ github.sha }}
+        run: |
+          import os, re, subprocess, sys, tomllib
+          from pathlib import Path
+
+          def fail(msg):
+              print(f"::error::{msg}")
+              sys.exit(1)
+
+          def sh(*a):
+              return subprocess.run(a, capture_output=True, text=True)
+
+          manifest = Path(os.environ["MANIFEST"])
+          prefix = os.environ["PREFIX"]
+          if not manifest.exists():
+              fail(f"{manifest} not found")
+          data = tomllib.loads(manifest.read_text())
+          pkg = data.get("package") or data.get("project") or fail(f"{manifest} has no [package]/[project]")
+          version = pkg.get("version")
+          if isinstance(version, dict) and version.get("workspace"):
+              for d in [manifest.parent.resolve(), *manifest.parent.resolve().parents]:
+                  root = d / "Cargo.toml"
+                  if root.exists():
+                      ws = tomllib.loads(root.read_text()).get("workspace", {}).get("package", {})
+                      if "version" in ws:
+                          version = ws["version"]
+                          break
+          if not isinstance(version, str):
+              fail(f"{manifest}: version is missing, dynamic or not a plain string")
+          m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+          if not m:
+              fail(f"version '{version}' is not plain MAJOR.MINOR.PATCH")
+          new = tuple(map(int, m.groups()))
+
+          pat = re.compile(re.escape(prefix) + r"(\d+)\.(\d+)\.(\d+)")
+          tags = {}
+          for t in sh("git", "tag", "-l", f"{prefix}*").stdout.split():
+              mt = pat.fullmatch(t)
+              if mt:
+                  tags[tuple(map(int, mt.groups()))] = t
+          latest = max(tags) if tags else None
+          tag = f"{prefix}{version}"
+
+          release = False
+          tag_exists = False
+          prev_tag = ""
+          note = ""
+          if latest is None:
+              release, note = True, f"first release {tag}"
+          else:
+              prev_tag = tags[latest]
+              if sh("git", "merge-base", "--is-ancestor", prev_tag, "HEAD").returncode != 0:
+                  fail(f"latest tag {prev_tag} is not in the history of this commit")
+              a, b, c = latest
+              allowed = [(a, b, c + 1), (a, b + 1, 0), (a + 1, 0, 0)]
+              if new == latest:
+                  note = f"version {version} unchanged since {prev_tag}: no release"
+                  tag_exists = True
+                  # recovery: tag is on this very commit but its GitHub Release is missing
+                  tagsha = sh("git", "rev-parse", f"{prev_tag}^{{commit}}").stdout.strip()
+                  if tagsha == os.environ["SHA"] and sh("gh", "release", "view", prev_tag).returncode != 0:
+                      release, note = True, f"{prev_tag} has no GitHub Release yet: creating it"
+              elif new in allowed:
+                  release, note = True, f"{prev_tag} -> {tag}"
+              else:
+                  ok = ", ".join(".".join(map(str, x)) for x in allowed)
+                  if new < latest:
+                      fail(f"version {version} goes backwards from {prev_tag}. Allowed next versions: {ok}, or keep {'.'.join(map(str, latest))}")
+                  fail(f"version {version} skips from {prev_tag}. Allowed next versions: {ok}")
+
+          on_branch = os.environ["EVENT"] == "push" and os.environ["REF"] == f"refs/heads/{os.environ['RELEASE_BRANCH']}"
+          do_release = release and on_branch
+          if release and not on_branch:
+              note += " (valid; will be released when it lands on " + os.environ["RELEASE_BRANCH"] + ")"
+          print(note)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={version}\ntag={tag}\nprev_tag={prev_tag}\nrelease={'true' if do_release else 'false'}\n")
+              f.write(f"tag_exists={'true' if tag_exists else 'false'}\nprerelease={'true' if new[0] == 0 else 'false'}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"### {tag}\n{note}\n")
+
+      - name: Install system packages
+        if: ${{ inputs.apt-packages != '' && (steps.ver.outputs.release == 'true' || github.event_name == 'pull_request') }}
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.apt-packages }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ endsWith(inputs.manifest, 'Cargo.toml') }}
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ endsWith(inputs.manifest, 'Cargo.toml') }}
+      - uses: astral-sh/setup-uv@v5
+        if: ${{ inputs.setup-uv }}
+
+      - name: Cargo.lock is in sync with the manifest
+        if: ${{ endsWith(inputs.manifest, 'Cargo.toml') }}
+        run: cargo metadata --locked --format-version 1 --manifest-path "$MANIFEST" > /dev/null
+
+      - name: Tests
+        if: ${{ inputs.test-command != '' && (steps.ver.outputs.release == 'true' || github.event_name == 'pull_request') }}
+        run: ${{ inputs.test-command }}
+
+      - name: Tag and release
+        if: ${{ steps.ver.outputs.release == 'true' }}
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          PREV: ${{ steps.ver.outputs.prev_tag }}
+          TAG_EXISTS: ${{ steps.ver.outputs.tag_exists }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          dir="$(dirname "$MANIFEST")"
+          if [ "$TAG_EXISTS" != "true" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" "$GITHUB_SHA" -m "${GITHUB_REPOSITORY#*/} $TAG
+
+          Created by the release workflow from commit ${GITHUB_SHA:0:7}."
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$TAG"
+          fi
+          range="${PREV:+$PREV..}$TAG"
+          { if [ -n "$PREV" ]; then echo "Changes since $PREV:"; else echo "First release."; fi
+            echo
+            git log --no-merges --format='- %s (%h)' "$range" -- "$dir"
+          } > notes.md
+          flags=(--verify-tag --title "$TAG" --notes-file notes.md)
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          [ "$PREFIX" = v ] && flags+=(--latest) || flags+=(--latest=false)
+          gh release create "$TAG" "${flags[@]}"
