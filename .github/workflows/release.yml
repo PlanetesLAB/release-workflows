@@ -7,6 +7,8 @@
 #     the three valid semver increments of it (patch / minor / major)
 #   * on a push to the release branch where the version is a valid increase: runs the checks,
 #     creates the annotated tag and the GitHub Release (notes = commit subjects since the previous tag)
+#   * after a release, optionally: builds the executable for linux-x86_64 (manylinux_2_28) and
+#     macos-arm64 and packs a resources folder, and attaches them to the Release
 # It never looks at commit messages, so any commit style works.
 name: release
 
@@ -40,6 +42,26 @@ on:
         description: "Install uv (for Python packages)"
         type: boolean
         default: false
+      binaries:
+        description: "After a release, build the executable named like the repo for linux-x86_64 and macos-arm64 and attach <repo>-<version>-<platform>.tar.gz"
+        type: boolean
+        default: false
+      build-env:
+        description: "Environment for the release build of the binaries, e.g. SCORPIA_RELEASE_BUILD=1"
+        type: string
+        default: ""
+      linux-packages:
+        description: "dnf arguments for the manylinux_2_28 build of the binaries, e.g. --enablerepo=powertools clang-devel"
+        type: string
+        default: ""
+      resources:
+        description: "After a release, attach this folder as <repo>-resources-<version>.tar.gz (empty: none)"
+        type: string
+        default: ""
+      resources-exclude:
+        description: "Space separated paths inside the resources archive to leave out, e.g. resources/big"
+        type: string
+        default: ""
     secrets:
       DEPS_TOKEN:
         description: "Fine-grained token with read access to the private repos used as git dependencies"
@@ -55,6 +77,10 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.ver.outputs.release }}
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
     env:
       MANIFEST: ${{ inputs.manifest }}
       PREFIX: ${{ inputs.tag-prefix }}
@@ -210,3 +236,99 @@ jobs:
           [ "$PRERELEASE" = true ] && flags+=(--prerelease)
           [ "$PREFIX" = v ] && flags+=(--latest) || flags+=(--latest=false)
           gh release create "$TAG" "${flags[@]}"
+
+  binaries:
+    needs: release
+    if: ${{ inputs.binaries && needs.release.outputs.release == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - platform: macos-arm64
+            runner: macos-14
+            container: ""
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    env:
+      NAME: ${{ github.event.repository.name }}
+      VERSION: ${{ needs.release.outputs.version }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          persist-credentials: false
+          submodules: ${{ inputs.submodules }}
+
+      - name: Let git reach private dependencies
+        if: ${{ env.DEPS_TOKEN != '' }}
+        run: |
+          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+      - name: Install system packages (Linux)
+        if: ${{ matrix.container != '' && inputs.linux-packages != '' }}
+        run: dnf install -y ${{ inputs.linux-packages }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: env ${{ inputs.build-env }} cargo build --release --locked
+
+      - name: Check the executable
+        run: |
+          "./target/release/$NAME" --version
+          if [ "$(uname)" = Linux ]; then ldd "target/release/$NAME"; else otool -L "target/release/$NAME"; fi
+
+      - name: Pack
+        run: tar -czf "$NAME-$VERSION-${{ matrix.platform }}.tar.gz" -C target/release "$NAME"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: "*.tar.gz"
+
+  assets:
+    needs: [release, binaries]
+    if: ${{ !cancelled() && needs.release.outputs.release == 'true' && needs.binaries.result != 'failure' && (inputs.binaries || inputs.resources != '') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NAME: ${{ github.event.repository.name }}
+      VERSION: ${{ needs.release.outputs.version }}
+      TAG: ${{ needs.release.outputs.tag }}
+      RESOURCES: ${{ inputs.resources }}
+      EXCLUDE: ${{ inputs.resources-exclude }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.binaries }}
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Pack the resources
+        if: ${{ inputs.resources != '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          excludes=(--exclude=.DS_Store)
+          for path in $EXCLUDE; do excludes+=("--exclude=$path"); done
+          tar -czf "dist/$NAME-resources-$VERSION.tar.gz" "${excludes[@]}" \
+            -C "$(dirname "$RESOURCES")" "$(basename "$RESOURCES")"
+
+      - name: Attach to the release
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release upload "$TAG" dist/*.tar.gz --clobber
+

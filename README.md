@@ -42,3 +42,27 @@ red run and no release.
 | suitesparse / suitesparse-sys | check | suitesparse-v / suitesparse-sys-v | each crate's Cargo.toml |
 
 Repos with two crates or packages get two jobs in the caller file, one per manifest and prefix.
+
+## Binaries and data archives
+
+After a release, two optional jobs attach files to the GitHub Release:
+
+- `binaries: true` builds the executable named like the repository for `linux-x86_64` (in the
+  `manylinux_2_28` container, so it runs on glibc 2.28 and newer) and `macos-arm64`, and attaches
+  `<repo>-<version>-<platform>.tar.gz`. `build-env` sets variables for that build (scorpia:
+  `SCORPIA_RELEASE_BUILD=1`, which lets `scorpia update` replace the binary); `linux-packages` are
+  `dnf` arguments for the container (e.g. `--enablerepo=powertools clang-devel blas-devel lapack-devel`).
+- `resources: <folder>` attaches the folder as `<repo>-resources-<version>.tar.gz`, with the folder
+  at the top of the archive; `resources-exclude` lists paths to leave out (`.DS_Store` always is).
+
+These jobs run only on a release, never on a plain push or a pull request. macOS runner minutes count
+several times Linux minutes on private repositories.
+
+## Documentation workflow
+
+`.github/workflows/docs.yml` runs `book/build.sh` in the calling repo. That script builds the API reference
+(`cargo doc`), the HTML manual (mdBook) and the PDF manual (Sphinx with LuaLaTeX). Warnings fail the run. The three
+outputs are uploaded as run artifacts (`api`, `book-html`, `book-pdf`), which only repo members can download.
+With `deploy: true` the HTML manual, never the API reference, is also published to GitHub Pages. The caller must
+then grant `pages: write` and `id-token: write`. It runs on every push and pull request; it never releases anything.
+Move the `v1` tag after adding it, as above.
