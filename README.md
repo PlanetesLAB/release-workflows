@@ -48,16 +48,27 @@ Repos with two crates or packages get two jobs in the caller file, one per manif
 After a release, two optional jobs attach files to the GitHub Release:
 
 - `binaries: true` builds the executable named like the repository for `linux-x86_64` (in the
-  `manylinux_2_28` container, so it runs on glibc 2.28 and newer) and `macos-arm64`, and attaches
-  `<repo>-<version>-<platform>.tar.gz`. `build-env` sets variables for that build (scorpia:
+  `manylinux_2_28` container, so it runs on glibc 2.28 and newer) and attaches
+  `<repo>-<version>-linux-x86_64.tar.gz`. `build-env` sets variables for that build (scorpia:
   `SCORPIA_RELEASE_BUILD=1`, which lets `scorpia update` replace the binary); `linux-packages` are
   `dnf` arguments for the container (e.g. `--enablerepo=powertools clang-devel blas-devel lapack-devel`). `build-args` adds
   cargo arguments to that build (limulus: `--features analysis,tui`).
 - `resources: <folder>` attaches the folder as `<repo>-resources-<version>.tar.gz`, with the folder
   at the top of the archive; `resources-exclude` lists paths to leave out (`.DS_Store` always is).
 
-These jobs run only on a release, never on a plain push or a pull request. macOS runner minutes count
-several times Linux minutes on private repositories.
+These jobs run only on a release, never on a plain push or a pull request.
+
+The `macos-arm64` executable is built on an arm64 Mac, after the release run, with
+
+```sh
+./macos-binary.sh <repository directory> <version>
+```
+
+It checks out the tag `v<version>` in a temporary worktree, builds it as the `binaries` job does
+(`build-env` and `build-args` from the repository's caller file, `--release --locked`,
+`MACOSX_DEPLOYMENT_TARGET=13.0`, so it runs on macOS 13 and newer), packs
+`<repo>-<version>-macos-arm64.tar.gz` and attaches it with `gh release upload --clobber`. The build
+reuses `target/macos-release/` of the repository between releases.
 
 ## Documentation workflow
 

@@ -8,7 +8,8 @@
 #   * on a push to the release branch where the version is a valid increase: runs the checks,
 #     creates the annotated tag and the GitHub Release (notes = commit subjects since the previous tag)
 #   * after a release, optionally: builds the executable for linux-x86_64 (manylinux_2_28) and
-#     macos-arm64 and packs a resources folder, and attaches them to the Release; a rerun on the
+#     packs a resources folder, and attaches them to the Release (the macos-arm64 executable is
+#     built on a Mac with macos-binary.sh); a rerun on the
 #     commit of an existing tag and Release builds and attaches them again
 # It never looks at commit messages, so any commit style works.
 name: release
@@ -259,17 +260,12 @@ jobs:
           - platform: linux-x86_64
             runner: ubuntu-latest
             container: quay.io/pypa/manylinux_2_28_x86_64
-          - platform: macos-arm64
-            runner: macos-latest
-            container: ""
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     env:
       NAME: ${{ github.event.repository.name }}
       VERSION: ${{ needs.release.outputs.version }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      # The oldest macOS the binary runs on; ignored on Linux.
-      MACOSX_DEPLOYMENT_TARGET: "13.0"
       DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -298,7 +294,7 @@ jobs:
       - name: Check the executable
         run: |
           "./target/release/$NAME" --version
-          if [ "$(uname)" = Linux ]; then ldd "target/release/$NAME"; else otool -L "target/release/$NAME"; fi
+          ldd "target/release/$NAME"
 
       - name: Pack
         run: tar -czf "$NAME-$VERSION-${{ matrix.platform }}.tar.gz" -C target/release "$NAME"
