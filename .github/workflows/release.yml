@@ -279,7 +279,8 @@ jobs:
 
       - name: Install system packages (Linux)
         if: ${{ matrix.container != '' && inputs.linux-packages != '' }}
-        run: dnf install -y ${{ inputs.linux-packages }}
+        # A repository that cannot be reached (e.g. a broken EPEL mirror) is skipped.
+        run: dnf install -y --setopt=skip_if_unavailable=True ${{ inputs.linux-packages }}
 
       - uses: dtolnay/rust-toolchain@stable
 
