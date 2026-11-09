@@ -51,7 +51,8 @@ After a release, two optional jobs attach files to the GitHub Release:
   `manylinux_2_28` container, so it runs on glibc 2.28 and newer) and `macos-arm64`, and attaches
   `<repo>-<version>-<platform>.tar.gz`. `build-env` sets variables for that build (scorpia:
   `SCORPIA_RELEASE_BUILD=1`, which lets `scorpia update` replace the binary); `linux-packages` are
-  `dnf` arguments for the container (e.g. `--enablerepo=powertools clang-devel blas-devel lapack-devel`).
+  `dnf` arguments for the container (e.g. `--enablerepo=powertools clang-devel blas-devel lapack-devel`). `build-args` adds
+  cargo arguments to that build (limulus: `--features analysis,tui`).
 - `resources: <folder>` attaches the folder as `<repo>-resources-<version>.tar.gz`, with the folder
   at the top of the archive; `resources-exclude` lists paths to leave out (`.DS_Store` always is).
 

@@ -50,6 +50,10 @@ on:
         description: "Environment for the release build of the binaries, e.g. SCORPIA_RELEASE_BUILD=1"
         type: string
         default: ""
+      build-args:
+        description: "Extra cargo build arguments for the binaries, e.g. --features analysis,tui"
+        type: string
+        default: ""
       linux-packages:
         description: "dnf arguments for the manylinux_2_28 build of the binaries, e.g. --enablerepo=powertools clang-devel"
         type: string
@@ -278,7 +282,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build
-        run: env ${{ inputs.build-env }} cargo build --release --locked
+        run: env ${{ inputs.build-env }} cargo build --release --locked ${{ inputs.build-args }}
 
       - name: Check the executable
         run: |
