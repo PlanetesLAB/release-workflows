@@ -252,7 +252,7 @@ jobs:
             runner: ubuntu-latest
             container: quay.io/pypa/manylinux_2_28_x86_64
           - platform: macos-arm64
-            runner: macos-14
+            runner: macos-latest
             container: ""
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
@@ -260,6 +260,8 @@ jobs:
       NAME: ${{ github.event.repository.name }}
       VERSION: ${{ needs.release.outputs.version }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # The oldest macOS the binary runs on; ignored on Linux.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
       DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
