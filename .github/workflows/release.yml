@@ -212,7 +212,7 @@ jobs:
           range="${PREV:+$PREV..}$TAG"
           { if [ -n "$PREV" ]; then echo "Changes since $PREV:"; else echo "First release."; fi
             echo
-            git log --no-merges --format='- %s (%h)' "$range" -- "$dir"
+            git log --no-merges --format="- %s ([%h](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/%H))" "$range" -- "$dir"
           } > notes.md
           flags=(--verify-tag --title "$TAG" --notes-file notes.md)
           [ "$PRERELEASE" = true ] && flags+=(--prerelease)
