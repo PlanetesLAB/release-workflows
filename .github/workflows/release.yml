@@ -11,6 +11,9 @@
 #     packs a resources folder, and attaches them to the Release (the macos-arm64 executable is
 #     built on a Mac with macos-binary.sh); a rerun on the
 #     commit of an existing tag and Release builds and attaches them again
+#   * after a release, optionally: builds the Python extension module as an abi3 wheel for
+#     linux-x86_64 (manylinux_2_28) with maturin and attaches it to the Release (the macos-arm64
+#     wheel is built on a Mac with macos-binary.sh)
 # It never looks at commit messages, so any commit style works.
 name: release
 
@@ -58,6 +61,14 @@ on:
         default: ""
       linux-packages:
         description: "dnf arguments for the manylinux_2_28 build of the binaries, e.g. --enablerepo=powertools clang-devel"
+        type: string
+        default: ""
+      python-wheels:
+        description: "After a release, build the maturin Python extension module as an abi3 wheel for linux-x86_64 and attach it"
+        type: boolean
+        default: false
+      python-module:
+        description: "Python module imported to check the wheel (default: the repository name)"
         type: string
         default: ""
       resources:
@@ -304,9 +315,68 @@ jobs:
           name: ${{ matrix.platform }}
           path: "*.tar.gz"
 
+  wheels:
+    needs: release
+    if: ${{ inputs.python-wheels && needs.release.outputs.assets == 'true' }}
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+      MODULE: ${{ inputs.python-module || github.event.repository.name }}
+      PY: /opt/python/cp312-cp312/bin/python
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          persist-credentials: false
+          submodules: ${{ inputs.submodules }}
+
+      - name: Let git reach private dependencies
+        if: ${{ env.DEPS_TOKEN != '' }}
+        run: |
+          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+      - name: Install system packages
+        if: ${{ inputs.linux-packages != '' }}
+        # A repository that cannot be reached (e.g. a broken EPEL mirror) is skipped.
+        run: dnf install -y --setopt=skip_if_unavailable=True ${{ inputs.linux-packages }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the wheel
+        # --auditwheel repair copies shared libraries the module links (e.g. BLAS) into the wheel.
+        run: |
+          set -euo pipefail
+          "$PY" -m pip install --quiet --root-user-action=ignore maturin
+          "$PY" -m maturin build --release --locked --compatibility manylinux_2_28 \
+            --auditwheel repair --interpreter "$PY" --out dist
+
+      - name: Check the wheel
+        run: |
+          set -euo pipefail
+          ls -l dist
+          shopt -s nullglob
+          whl=(dist/*.whl)
+          [ ${#whl[@]} -eq 1 ] || { echo "::error::expected one wheel, got ${#whl[@]}"; exit 1; }
+          name=$(basename "${whl[0]}")
+          case "$name" in *-"$VERSION"-*) ;; *) echo "::error::$name does not carry version $VERSION"; exit 1;; esac
+          case "$name" in *-abi3-*) ;; *) echo "::error::$name is not an abi3 wheel (enable pyo3's abi3-pyXY feature)"; exit 1;; esac
+          "$PY" -m venv /tmp/check
+          /tmp/check/bin/pip install --quiet "${whl[0]}"
+          cd /tmp && /tmp/check/bin/python -c "import $MODULE; print($MODULE.__file__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: dist/*.whl
+
   assets:
-    needs: [release, binaries]
-    if: ${{ !cancelled() && needs.release.outputs.assets == 'true' && needs.binaries.result != 'failure' && (inputs.binaries || inputs.resources != '') }}
+    needs: [release, binaries, wheels]
+    if: ${{ !cancelled() && needs.release.outputs.assets == 'true' && needs.binaries.result != 'failure' && needs.wheels.result != 'failure' && (inputs.binaries || inputs.python-wheels || inputs.resources != '') }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -322,7 +392,7 @@ jobs:
           persist-credentials: false
 
       - uses: actions/download-artifact@v4
-        if: ${{ inputs.binaries }}
+        if: ${{ inputs.binaries || inputs.python-wheels }}
         with:
           path: dist
           merge-multiple: true
@@ -341,5 +411,7 @@ jobs:
         run: |
           set -euo pipefail
           ls -l dist
-          gh release upload "$TAG" dist/*.tar.gz --clobber
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.whl)
+          gh release upload "$TAG" "${files[@]}" --clobber
 

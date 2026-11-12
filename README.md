@@ -56,19 +56,45 @@ After a release, two optional jobs attach files to the GitHub Release:
 - `resources: <folder>` attaches the folder as `<repo>-resources-<version>.tar.gz`, with the folder
   at the top of the archive; `resources-exclude` lists paths to leave out (`.DS_Store` always is).
 
+- `python-wheels: true` builds the maturin Python extension module as an abi3 wheel for
+  `linux-x86_64` (`manylinux_2_28`, with `linux-packages` installed and shared libraries such as BLAS
+  copied into the wheel) and attaches it. The run fails if the wheel is not abi3 (enable pyo3's
+  `abi3-pyXY` feature, so one wheel serves every Python from 3.XY on), does not carry the release
+  version (use `dynamic = ["version"]` in pyproject.toml so maturin takes it from Cargo.toml), or
+  cannot be imported. `python-module` names the module to import (default: the repository name).
+
 These jobs run only on a release, never on a plain push or a pull request.
 
-The `macos-arm64` executable is built on an arm64 Mac, after the release run, with
+The `macos-arm64` assets are built on an arm64 Mac, after the release run, with
 
 ```sh
 ./macos-binary.sh <repository directory> <version>
 ```
 
-It checks out the tag `v<version>` in a temporary worktree, builds it as the `binaries` job does
-(`build-env` and `build-args` from the repository's caller file, `--release --locked`,
-`MACOSX_DEPLOYMENT_TARGET=13.0`, so it runs on macOS 13 and newer), packs
-`<repo>-<version>-macos-arm64.tar.gz` and attaches it with `gh release upload --clobber`. The build
-reuses `target/macos-release/` of the repository between releases.
+It checks out the tag `v<version>` in a temporary worktree and builds what the repository's caller
+file asks for, with `MACOSX_DEPLOYMENT_TARGET=13.0` (runs on macOS 13 and newer):
+
+- `binaries: true`: the executable as the `binaries` job does (`build-env`, `build-args`,
+  `--release --locked`), packed as `<repo>-<version>-macos-arm64.tar.gz`; reuses
+  `target/macos-release/` between releases.
+- `python-wheels: true`: the wheel with `uvx maturin`, made self-contained with `delocate-wheel`,
+  checked by importing it in a fresh venv; reuses `target/macos-wheel/`. Needs uv.
+
+Each file is attached with `gh release upload --clobber`.
+
+## Installing the Python wheels
+
+Collaborators with read access to the repository install a release's wheel into the active
+environment (uv venv, conda env or plain venv) with `gh` and pip or uv:
+
+```sh
+gh release download v1.2.3 -R PlanetesLAB/<repo> -p '*.whl' -D /tmp/<repo>-wheels
+python -m pip install --find-links /tmp/<repo>-wheels <package>==1.2.3     # pip, also in a conda env
+uv pip install --find-links /tmp/<repo>-wheels <package>==1.2.3            # uv
+```
+
+`--find-links` picks the wheel for the platform. Repositories can ship an `install-python.sh` that
+does this (see limulus).
 
 ## Documentation workflow
 
